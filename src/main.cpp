@@ -14,7 +14,7 @@
 #include "testing_helpers.hpp"
 
 // const int SIZE = 1 << 8; // feel free to change the size of array
-const int SIZE = 1000000; // feel free to change the size of array
+const int SIZE = 10000000; // feel free to change the size of array
 const int NPOT = SIZE - 3; // Non-Power-Of-Two
 int *a = new int[SIZE];
 int *b = new int[SIZE];
