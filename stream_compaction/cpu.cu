@@ -62,7 +62,11 @@ namespace StreamCompaction {
             }
             //scan
             int* scanOut = new int[n];
-            scan(n,scanOut,map);
+            //do not call scan func here,cause timer can be fired only once 
+            scanOut[0]=0;
+            for(int i = 1;i<n;i++){
+                scanOut[i] = scanOut[i-1] + map[i-1];
+            }
             int count = 0;
             for(int i = 0;i<n;i++){
                 if(map[i]!=0){
@@ -72,6 +76,8 @@ namespace StreamCompaction {
             }
             //scatter
             timer().endCpuTimer();
+            delete[] map;
+            delete[] scanOut;
             return count;
         }
     }
