@@ -44,3 +44,12 @@ source_group(Sources FILES ${sources})
 add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
 target_link_libraries(${CMAKE_PROJECT_NAME} stream_compaction)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
+
+
+if(MSVC)
+    # 全局禁用 C++ 编译器的 C4819 警告
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/wd4819>")
+    
+    # 全局禁用 CUDA 编译器的 C4819 警告（传给宿主 MSVC 编译器）
+    add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4819>")
+endif()
