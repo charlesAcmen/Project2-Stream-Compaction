@@ -25,7 +25,7 @@ namespace StreamCompaction {
          * @param data    Input data array
          * @param bitPos  Bit position to extract (0 = LSB)
          */
-        __global__ void kernExtractBit(int n, int *bools, const int *data, int bitPos) {
+        __global__ void kernMapToBoolean(int n, int *bools, const int *data, int bitPos) {
             int index = threadIdx.x + (blockIdx.x * blockDim.x);
             if (index >= n) {
                 return;
@@ -46,7 +46,7 @@ namespace StreamCompaction {
          * @param scanned    Exclusive scan of bools (write positions for bit=0)
          * @param totalZeros Total count of elements with bit=0
          */
-        __global__ void kernScatterRadix(int n, int *odata, const int *idata,
+        __global__ void kernScatter(int n, int *odata, const int *idata,
                                           const int *bools, const int *scanned,
                                           int totalZeros) {
             int index = threadIdx.x + (blockIdx.x * blockDim.x);
@@ -63,6 +63,15 @@ namespace StreamCompaction {
                 int onesBeforeMe = index - scanned[index];
                 odata[totalZeros + onesBeforeMe] = idata[index];
             }
+        }
+
+        /**
+         * Placeholder kernel for exclusive scan.
+         * Not used directly -- radixsort() reuses Efficient::kernUpSweep
+         * and Efficient::kernDownSweep via the scanIndices() helper.
+         */
+        __global__ void kernExclusiveScan(int n, int* scanned, const int* bools) {
+            // Placeholder -- see scanIndices() for the actual scan implementation.
         }
 
         /**
@@ -141,8 +150,8 @@ namespace StreamCompaction {
             for (int bit = 0; bit < numBits; bit++) {
                 // Step 1: Extract current bit
                 //   bools[i] = 1 if data[i] has bit=0, 0 if bit=1
-                kernExtractBit<<<fullBlocks, blockSize>>>(n, dev_bools, dev_data, bit);
-                checkCUDAError("kernExtractBit failed");
+                kernMapToBoolean<<<fullBlocks, blockSize>>>(n, dev_bools, dev_data, bit);
+                checkCUDAError("kernMapToBoolean failed");
 
                 // Step 2: Exclusive scan on bools to get write positions
                 cudaMemcpy(dev_indices, dev_bools, n * sizeof(int), cudaMemcpyDeviceToDevice);
@@ -151,10 +160,10 @@ namespace StreamCompaction {
                 }
                 int totalZeros = scanIndices(n, paddedN, dev_indices);
 
-                // Step 3: Scatter — bit=0 elements to front, bit=1 to back
-                kernScatterRadix<<<fullBlocks, blockSize>>>(
+                // Step 3: Scatter -- bit=0 elements to front, bit=1 to back
+                kernScatter<<<fullBlocks, blockSize>>>(
                     n, dev_temp, dev_data, dev_bools, dev_indices, totalZeros);
-                checkCUDAError("kernScatterRadix failed");
+                checkCUDAError("kernScatter failed");
 
                 // Swap buffers for next bit iteration
                 int *tmp = dev_data;
