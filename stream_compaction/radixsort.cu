@@ -16,7 +16,10 @@ namespace StreamCompaction {
          * @param data  The array of elements to sort.
          */
          void radixsort(int n, int *data){
+            timer().startGpuTimer();
+            //TODO
 
+            timer().endGpuTimer();
          }
     }
 }
