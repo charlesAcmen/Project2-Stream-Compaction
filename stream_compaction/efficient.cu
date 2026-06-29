@@ -85,6 +85,7 @@ namespace StreamCompaction {
 
             // Up-sweep phase
             for (int d = 0; d < ilog2ceil(paddedN); d++) {
+                //Thread Compaction
                 int numThreads = paddedN / (1 << (d + 1));
                 dim3 fullBlocksPerGrid((numThreads + blockSize - 1) / blockSize);
                 
@@ -97,6 +98,7 @@ namespace StreamCompaction {
             
             // Down-sweep phase
             for (int d = ilog2ceil(paddedN) - 1; d >= 0; d--) {
+                //Thread Compaction
                 int numThreads = paddedN / (1 << (d + 1));
                 dim3 fullBlocksPerGrid((numThreads + blockSize - 1) / blockSize);
                 
