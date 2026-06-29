@@ -45,6 +45,11 @@ add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
 target_link_libraries(${CMAKE_PROJECT_NAME} stream_compaction)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
 
+# Add parameterized test executable for radix sort
+set(sources_param "src/main_parameterized.cpp")
+add_executable(radixsort_test ${sources_param} ${headers})
+target_link_libraries(radixsort_test stream_compaction)
+
 
 if(MSVC)
     # 全局禁用 C++ 编译器的 C4819 警告
