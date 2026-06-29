@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """
-plot.py -- Read benchmark CSVs and generate publication-quality charts.
+plot.py -- Read benchmark CSVs and generate intuitive performance charts.
 
 Usage:
   python scripts/plot.py results/20260629_190000/
-  python scripts/plot.py results/20260629_190000/ --no-show
 
 Outputs PNG files alongside the CSV files in the results folder.
+
+Charts generated:
+  chart_scan_comparison.png       -- Log-log: all scan methods
+  chart_compact_comparison.png    -- Log-log: stream compaction methods
+  chart_radix_comparison.png      -- Log-log: CPU vs GPU radix sort
+  chart_scan_speedup.png          -- Scan: GPU speedup vs CPU serial
+  chart_compact_speedup.png       -- Compaction: GPU speedup vs CPU
+  chart_radix_speedup.png         -- Radix: GPU speedup vs CPU
+  chart_overview.png              -- Combined: all GPU methods speedup summary
 """
 
 import csv
@@ -15,26 +23,28 @@ import os
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")  # headless
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Style constants
+# Style constants — colorblind-friendly (Wong 2011, Nature Methods)
 # ---------------------------------------------------------------------------
-# Colorblind-friendly palette (Wong 2011, Nature Methods)
-CPU_COLOR       = "#333333"
-NAIVE_COLOR     = "#E69F00"
-EFFICIENT_COLOR = "#0072B2"
-THRUST_COLOR    = "#009E73"
-GPU_RADIX_COLOR = "#CC79A7"
+CPU_COLOR           = "#333333"
+NAIVE_COLOR         = "#E69F00"
+EFFICIENT_COLOR     = "#0072B2"
+THRUST_COLOR        = "#009E73"
+COMPACT_CPU_NOSCAN  = "#8B4513"
+COMPACT_CPU_SCAN    = "#D55E00"
+COMPACT_GPU_COLOR   = "#56B4E9"
+GPU_RADIX_COLOR     = "#CC79A7"
 
-LINE_WIDTH    = 1.8
-MARKER_SIZE   = 6
-FONT_SIZE     = 11
-TITLE_SIZE    = 13
-DPI           = 200
+LINE_WIDTH   = 1.8
+MARKER_SIZE  = 5.5
+FONT_SIZE    = 11
+TITLE_SIZE   = 13
+DPI          = 200
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -47,7 +57,7 @@ plt.rcParams.update({
     "axes.spines.right": False,
     "xtick.labelsize": FONT_SIZE - 1,
     "ytick.labelsize": FONT_SIZE - 1,
-    "legend.fontsize": FONT_SIZE - 1,
+    "legend.fontsize": FONT_SIZE - 2,
     "legend.frameon": True,
     "legend.framealpha": 0.9,
     "legend.edgecolor": "#cccccc",
@@ -57,7 +67,7 @@ plt.rcParams.update({
 
 
 def read_csv(path):
-    """Read a CSV file and return (headers, list_of_rows)."""
+    """Read a CSV file, return (headers, list_of_rows)."""
     with open(path, newline="") as f:
         reader = csv.reader(f)
         headers = next(reader)
@@ -67,37 +77,43 @@ def read_csv(path):
     return headers, rows
 
 
+# ======================================================================
+# Chart 1: Scan comparison (log-log)
+# ======================================================================
 def plot_scan(csv_path, out_dir):
-    """Chart 1: Prefix-sum (Scan) -- CPU / Naive / Efficient / Thrust."""
     _, rows = read_csv(csv_path)
-    sizes   = np.array([r[0] for r in rows], dtype=int)
-    cpu     = np.array([r[1] for r in rows])
-    naive   = np.array([r[2] for r in rows])
-    eff     = np.array([r[3] for r in rows])
-    thrust  = np.array([r[4] for r in rows])
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    cpu    = np.array([r[1] for r in rows])
+    naive  = np.array([r[2] for r in rows])
+    eff    = np.array([r[3] for r in rows])
+    thrust = np.array([r[4] for r in rows])
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
-    ax.loglog(sizes, cpu,    "s-", color=CPU_COLOR,       linewidth=LINE_WIDTH,
-              markersize=MARKER_SIZE, label="CPU (serial)")
-    ax.loglog(sizes, naive,  "o-", color=NAIVE_COLOR,     linewidth=LINE_WIDTH,
-              markersize=MARKER_SIZE, label="Naive GPU")
-    ax.loglog(sizes, eff,    "D-", color=EFFICIENT_COLOR, linewidth=LINE_WIDTH,
-              markersize=MARKER_SIZE, label="Work-Efficient GPU")
-    ax.loglog(sizes, thrust, "^-", color=THRUST_COLOR,    linewidth=LINE_WIDTH,
-              markersize=MARKER_SIZE, label="Thrust (library)")
+    ax.loglog(sizes, cpu,    "s-",  color=CPU_COLOR,       linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="CPU serial scan", zorder=4)
+    ax.loglog(sizes, naive,  "o--", color=NAIVE_COLOR,     linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Naive GPU scan", zorder=3)
+    ax.loglog(sizes, eff,    "D-",  color=EFFICIENT_COLOR, linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Work-Efficient GPU scan", zorder=5)
+    ax.loglog(sizes, thrust, "^-",  color=THRUST_COLOR,    linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Thrust scan (library)", zorder=2)
 
-    ax.set_xlabel("Array Size")
+    # Annotate slopes for reference
+    mid_x = sizes[len(sizes) // 3]
+    mid_y_cpu = cpu[len(cpu) // 3]
+    ax.annotate("O(n)", xy=(mid_x, mid_y_cpu), xytext=(mid_x * 3, mid_y_cpu * 0.6),
+                fontsize=8, color=CPU_COLOR,
+                arrowprops=dict(arrowstyle="->", color=CPU_COLOR, lw=0.6))
+
+    ax.set_xlabel("Array Size N")
     ax.set_ylabel("Time (ms)")
-    ax.set_title("Prefix Sum (Scan) Performance")
+    ax.set_title("Prefix Sum (Scan) — Performance vs N")
     ax.legend(loc="upper left")
 
-    # Power-of-2 tick labels
     ax.set_xticks(sizes)
     ax.set_xticklabels([f"$2^{{{int(np.log2(s))}}}$" for s in sizes],
                        rotation=35, ha="right", fontsize=FONT_SIZE - 3)
-    ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
-
     ax.grid(True, which="major", linestyle="-", linewidth=0.4)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
 
@@ -108,42 +124,80 @@ def plot_scan(csv_path, out_dir):
     print(f"  -> {out_path}")
 
 
-def plot_radix(csv_path, out_dir):
-    """Chart 2: Radix Sort -- CPU std::sort vs GPU Radix Sort."""
+# ======================================================================
+# Chart 2: Stream Compaction comparison (log-log)
+# ======================================================================
+def plot_compact(csv_path, out_dir):
     _, rows = read_csv(csv_path)
-    sizes   = np.array([r[0] for r in rows], dtype=int)
-    cpu     = np.array([r[1] for r in rows])
-    gpu     = np.array([r[2] for r in rows])
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    cpu_no = np.array([r[1] for r in rows])
+    cpu_sc = np.array([r[2] for r in rows])
+    gpu    = np.array([r[3] for r in rows])
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
-    ax.loglog(sizes, cpu, "s-",  color=CPU_COLOR,       linewidth=LINE_WIDTH,
-              markersize=MARKER_SIZE, label="CPU std::sort")
-    ax.loglog(sizes, gpu, "D--", color=GPU_RADIX_COLOR, linewidth=LINE_WIDTH,
-              markersize=MARKER_SIZE, label="GPU Radix Sort")
+    ax.loglog(sizes, cpu_no, "s-",  color=COMPACT_CPU_NOSCAN, linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="CPU compact (no scan)", zorder=4)
+    ax.loglog(sizes, cpu_sc, "o--", color=COMPACT_CPU_SCAN, linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="CPU compact (with scan)", zorder=3)
+    ax.loglog(sizes, gpu,    "D-",  color=COMPACT_GPU_COLOR, linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="GPU work-efficient compact", zorder=5)
 
-    ax.set_xlabel("Array Size")
+    ax.set_xlabel("Array Size N")
     ax.set_ylabel("Time (ms)")
-    ax.set_title("Radix Sort Performance")
+    ax.set_title("Stream Compaction — Performance vs N (~50% zeros)")
     ax.legend(loc="upper left")
 
     ax.set_xticks(sizes)
     ax.set_xticklabels([f"$2^{{{int(np.log2(s))}}}$" for s in sizes],
                        rotation=35, ha="right", fontsize=FONT_SIZE - 3)
-    ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
+    ax.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
 
-    # Annotate crossover region
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_compact_comparison.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 3: Radix Sort comparison (log-log)
+# ======================================================================
+def plot_radix(csv_path, out_dir):
+    _, rows = read_csv(csv_path)
+    sizes = np.array([r[0] for r in rows], dtype=int)
+    cpu   = np.array([r[1] for r in rows])
+    gpu   = np.array([r[2] for r in rows])
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    ax.loglog(sizes, cpu, "s-",  color=CPU_COLOR,       linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="CPU std::sort", zorder=3)
+    ax.loglog(sizes, gpu, "D--", color=GPU_RADIX_COLOR, linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="GPU Radix Sort (LSB)", zorder=4)
+
+    # Find and annotate crossover
     for i, (c, g) in enumerate(zip(cpu, gpu)):
         if g < c:
             ax.annotate(
-                f"GPU faster\nfrom $2^{{{int(np.log2(sizes[i]))}}}$",
+                f"GPU overtakes CPU\nat N=$2^{{{int(np.log2(sizes[i]))}}}$",
                 xy=(sizes[i], gpu[i]),
-                xytext=(sizes[i] * 4, gpu[i] * 2),
+                xytext=(sizes[i] * 0.4, gpu[i] * 2.5),
                 arrowprops=dict(arrowstyle="->", color="#555555", lw=0.8),
                 fontsize=FONT_SIZE - 2, color="#555555",
+                ha="center",
             )
             break
 
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("Radix Sort — Performance vs N")
+    ax.legend(loc="upper left")
+
+    ax.set_xticks(sizes)
+    ax.set_xticklabels([f"$2^{{{int(np.log2(s))}}}$" for s in sizes],
+                       rotation=35, ha="right", fontsize=FONT_SIZE - 3)
     ax.grid(True, which="major", linestyle="-", linewidth=0.4)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
 
@@ -154,47 +208,259 @@ def plot_radix(csv_path, out_dir):
     print(f"  -> {out_path}")
 
 
-def plot_radix_speedup(csv_path, out_dir):
-    """Chart 3: Radix Sort speedup ratio (cpu_time / gpu_time)."""
+# ======================================================================
+# Chart 4: Scan speedup (GPU / CPU) — linear X, log Y optional
+# ======================================================================
+def plot_scan_speedup(csv_path, out_dir):
     _, rows = read_csv(csv_path)
-    sizes   = np.array([r[0] for r in rows], dtype=int)
-    cpu     = np.array([r[1] for r in rows])
-    gpu     = np.array([r[2] for r in rows])
-    speedup = cpu / gpu
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    cpu    = np.array([r[1] for r in rows])
+    naive  = np.array([r[2] for r in rows])
+    eff    = np.array([r[3] for r in rows])
+    thrust = np.array([r[4] for r in rows])
 
-    fig, ax = plt.subplots(figsize=(9, 4.5))
+    naive_sp  = cpu / naive
+    eff_sp    = cpu / eff
+    thrust_sp = cpu / thrust
 
-    ax.semilogx(sizes, speedup, "D-", color=GPU_RADIX_COLOR,
-                linewidth=LINE_WIDTH, markersize=MARKER_SIZE + 1)
+    fig, ax = plt.subplots(figsize=(9, 5))
 
-    # Reference line at 1.0 (break-even)
+    ax.semilogx(sizes, naive_sp,  "o--", color=NAIVE_COLOR,     linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="Naive GPU")
+    ax.semilogx(sizes, eff_sp,    "D-",  color=EFFICIENT_COLOR, linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="Work-Efficient GPU")
+    ax.semilogx(sizes, thrust_sp, "^-",  color=THRUST_COLOR,    linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="Thrust (library)")
+
     ax.axhline(y=1.0, color="#999999", linestyle="--", linewidth=0.8, alpha=0.7)
-    ax.text(sizes[-1] * 0.5, 1.15, "break-even", color="#999999",
-            fontsize=FONT_SIZE - 2, ha="right")
+    ax.text(sizes[-1] * 0.65, 1.08, "CPU baseline = 1.0x", color="#999999",
+            fontsize=9, ha="right")
 
-    ax.set_xlabel("Array Size")
-    ax.set_ylabel("Speedup  (CPU / GPU)")
-    ax.set_title("Radix Sort GPU Speedup")
+    # Annotate peak speedups
+    for sp, lbl, clr in [(thrust_sp, "Thrust", THRUST_COLOR),
+                           (eff_sp, "Work-Eff.", EFFICIENT_COLOR)]:
+        i = np.argmax(sp)
+        ax.annotate(f"{lbl}\n{sp[i]:.1f}x",
+                    xy=(sizes[i], sp[i]),
+                    xytext=(sizes[i] * 1.5, sp[i] - 0.3),
+                    arrowprops=dict(arrowstyle="->", color="#555555", lw=0.7),
+                    fontsize=8, fontweight="bold", color=clr)
+
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Speedup vs CPU serial scan")
+    ax.set_title("Scan — GPU Speedup Ratio")
+    ax.legend(loc="upper left")
 
     ax.set_xticks(sizes)
     ax.set_xticklabels([f"$2^{{{int(np.log2(s))}}}$" for s in sizes],
                        rotation=35, ha="right", fontsize=FONT_SIZE - 3)
+    ax.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
 
-    # Label the max speedup
-    idx_max = np.argmax(speedup)
-    ax.annotate(
-        f"{speedup[idx_max]:.1f}x",
-        xy=(sizes[idx_max], speedup[idx_max]),
-        xytext=(sizes[idx_max] * 2.5, speedup[idx_max] + 0.3),
-        arrowprops=dict(arrowstyle="->", color="#555555", lw=0.8),
-        fontsize=FONT_SIZE - 1, fontweight="bold", color=GPU_RADIX_COLOR,
-    )
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_scan_speedup.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 5: Compaction speedup
+# ======================================================================
+def plot_compact_speedup(csv_path, out_dir):
+    _, rows = read_csv(csv_path)
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    cpu_no = np.array([r[1] for r in rows])
+    cpu_sc = np.array([r[2] for r in rows])
+    gpu    = np.array([r[3] for r in rows])
+
+    gpu_sp_no = cpu_no / gpu
+    gpu_sp_sc = cpu_sc / gpu
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    ax.semilogx(sizes, gpu_sp_no, "D-", color=COMPACT_GPU_COLOR, linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="GPU vs CPU (no scan)")
+    ax.semilogx(sizes, gpu_sp_sc, "o--", color=COMPACT_CPU_SCAN, linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="GPU vs CPU (with scan)")
+
+    ax.axhline(y=1.0, color="#999999", linestyle="--", linewidth=0.8, alpha=0.7)
+    ax.text(sizes[-1] * 0.65, 1.08, "CPU baseline = 1.0x", color="#999999",
+            fontsize=9, ha="right")
+
+    i = np.argmax(gpu_sp_no)
+    ax.annotate(f"{gpu_sp_no[i]:.1f}x",
+                xy=(sizes[i], gpu_sp_no[i]),
+                xytext=(sizes[i] * 1.5, gpu_sp_no[i] + 0.3),
+                arrowprops=dict(arrowstyle="->", color="#555555", lw=0.7),
+                fontsize=9, fontweight="bold", color=COMPACT_GPU_COLOR)
+
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Speedup vs CPU")
+    ax.set_title("Stream Compaction — GPU Speedup Ratio (~50% zeros)")
+    ax.legend(loc="upper left")
+
+    ax.set_xticks(sizes)
+    ax.set_xticklabels([f"$2^{{{int(np.log2(s))}}}$" for s in sizes],
+                       rotation=35, ha="right", fontsize=FONT_SIZE - 3)
+    ax.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_compact_speedup.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 6: Radix sort speedup
+# ======================================================================
+def plot_radix_speedup(csv_path, out_dir):
+    _, rows = read_csv(csv_path)
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    cpu    = np.array([r[1] for r in rows])
+    gpu    = np.array([r[2] for r in rows])
+    speedup = cpu / gpu
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    # Color bars above/below break-even
+    colors = [GPU_RADIX_COLOR if s >= 1.0 else "#D55E00" for s in speedup]
+    bars = ax.bar(np.arange(len(sizes)), speedup, color=colors, width=0.6, edgecolor="white")
+
+    ax.axhline(y=1.0, color="#333333", linestyle="--", linewidth=1.0, alpha=0.8)
+    ax.text(len(sizes) - 1.3, 1.08, "break-even", color="#333333", fontsize=9, ha="right")
+
+    ax.set_xticks(np.arange(len(sizes)))
+    ax.set_xticklabels([f"$2^{{{int(np.log2(s))}}}$" for s in sizes],
+                       rotation=35, ha="right", fontsize=FONT_SIZE - 3)
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Speedup (CPU / GPU)")
+    ax.set_title("Radix Sort — GPU Speedup Ratio")
+
+    # Value labels on bars
+    for i, (s, sp) in enumerate(zip(sizes, speedup)):
+        va = "bottom" if sp >= 1.0 else "top"
+        y_off = 0.05 if sp >= 1 else -0.05
+        ax.text(i, sp + y_off, f"{sp:.1f}x", ha="center", fontsize=7,
+                fontweight="bold", va=va, color=colors[i])
+
+    ax.grid(True, which="major", axis="y", linestyle="-", linewidth=0.4)
+    ax.grid(True, which="minor", axis="y", linestyle=":", linewidth=0.2)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_radix_speedup.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 7: Combined Overview — GPU speedup for all algorithms
+# ======================================================================
+def plot_overview(scan_csv, compact_csv, radix_csv, out_dir):
+    """Unified view: best GPU method from each category vs its CPU baseline."""
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    # Scan: use Thrust as best GPU
+    if scan_csv and os.path.exists(scan_csv):
+        _, rows = read_csv(scan_csv)
+        sizes_s = np.array([r[0] for r in rows], dtype=int)
+        cpu_s   = np.array([r[1] for r in rows])
+        thrust  = np.array([r[4] for r in rows])
+        sp_s    = cpu_s / thrust
+        ax.semilogx(sizes_s, sp_s, "^-", color=THRUST_COLOR, linewidth=LINE_WIDTH,
+                    markersize=MARKER_SIZE, label="Scan (Thrust)")
+
+    # Compact: GPU efficient
+    if compact_csv and os.path.exists(compact_csv):
+        _, rows = read_csv(compact_csv)
+        sizes_c = np.array([r[0] for r in rows], dtype=int)
+        cpu_c   = np.array([r[1] for r in rows])
+        gpu_c   = np.array([r[3] for r in rows])
+        sp_c    = cpu_c / gpu_c
+        ax.semilogx(sizes_c, sp_c, "D-", color=COMPACT_GPU_COLOR, linewidth=LINE_WIDTH,
+                    markersize=MARKER_SIZE, label="Stream Compaction")
+
+    # Radix
+    if radix_csv and os.path.exists(radix_csv):
+        _, rows = read_csv(radix_csv)
+        sizes_r = np.array([r[0] for r in rows], dtype=int)
+        cpu_r   = np.array([r[1] for r in rows])
+        gpu_r   = np.array([r[2] for r in rows])
+        sp_r    = cpu_r / gpu_r
+        ax.semilogx(sizes_r, sp_r, "s-", color=GPU_RADIX_COLOR, linewidth=LINE_WIDTH,
+                    markersize=MARKER_SIZE, label="Radix Sort")
+
+    ax.axhline(y=1.0, color="#333333", linestyle="--", linewidth=1.0, alpha=0.8)
+    ax.text(ax.get_xlim()[1] * 0.5, 1.08, "CPU baseline", color="#333333",
+            fontsize=9, ha="center")
+
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("GPU Speedup vs CPU")
+    ax.set_title("GPU Acceleration Summary — Speedup vs N")
+    ax.legend(loc="upper left")
 
     ax.grid(True, which="major", linestyle="-", linewidth=0.4)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
 
     fig.tight_layout()
-    out_path = os.path.join(out_dir, "chart_radix_speedup.png")
+    out_path = os.path.join(out_dir, "chart_overview.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 8: Throughput (elements/ms) — better for comparing raw speed
+# ======================================================================
+def plot_throughput(scan_csv, compact_csv, radix_csv, out_dir):
+    """Show throughput (M elements / ms) for GPU implementations only."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    # --- Scan throughput ---
+    if scan_csv and os.path.exists(scan_csv):
+        _, rows = read_csv(scan_csv)
+        sizes  = np.array([r[0] for r in rows], dtype=int)
+        eff    = np.array([r[3] for r in rows])  # work-efficient
+        thrust = np.array([r[4] for r in rows])
+        ax1.loglog(sizes, sizes / eff / 1e3,    "D-", color=EFFICIENT_COLOR,
+                   linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                   label="Work-Efficient GPU")
+        ax1.loglog(sizes, sizes / thrust / 1e3, "^-", color=THRUST_COLOR,
+                   linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                   label="Thrust")
+
+    ax1.set_xlabel("Array Size N")
+    ax1.set_ylabel("Throughput (Melements/ms)")
+    ax1.set_title("Scan — GPU Throughput")
+    ax1.legend(loc="lower right")
+    ax1.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax1.grid(True, which="minor", linestyle=":", linewidth=0.2)
+
+    # --- Radix throughput ---
+    if radix_csv and os.path.exists(radix_csv):
+        _, rows = read_csv(radix_csv)
+        sizes = np.array([r[0] for r in rows], dtype=int)
+        cpu   = np.array([r[1] for r in rows])
+        gpu   = np.array([r[2] for r in rows])
+        ax2.loglog(sizes, sizes / cpu / 1e3, "s-",  color=CPU_COLOR,
+                   linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                   label="CPU std::sort")
+        ax2.loglog(sizes, sizes / gpu / 1e3, "D--", color=GPU_RADIX_COLOR,
+                   linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                   label="GPU Radix Sort")
+
+    ax2.set_xlabel("Array Size N")
+    ax2.set_ylabel("Throughput (Melements/ms)")
+    ax2.set_title("Radix Sort — Throughput Comparison")
+    ax2.legend(loc="upper left")
+    ax2.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax2.grid(True, which="minor", linestyle=":", linewidth=0.2)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_throughput.png")
     fig.savefig(out_path, dpi=DPI)
     plt.close(fig)
     print(f"  -> {out_path}")
@@ -214,23 +480,39 @@ def main():
         print(f"ERROR: not a directory: {data_dir}")
         sys.exit(1)
 
-    scan_csv  = data_dir / "scan_comparison.csv"
-    radix_csv = data_dir / "radix_comparison.csv"
+    scan_csv    = data_dir / "scan_comparison.csv"
+    compact_csv = data_dir / "compact_comparison.csv"
+    radix_csv   = data_dir / "radix_comparison.csv"
 
     print(f"Plotting from: {data_dir}")
+    print()
 
     if scan_csv.exists():
         plot_scan(scan_csv, data_dir)
+        plot_scan_speedup(scan_csv, data_dir)
     else:
-        print(f"  (no scan CSV found)")
+        print("  (no scan CSV found)")
+
+    if compact_csv.exists():
+        plot_compact(compact_csv, data_dir)
+        plot_compact_speedup(compact_csv, data_dir)
+    else:
+        print("  (no compact CSV found)")
 
     if radix_csv.exists():
         plot_radix(radix_csv, data_dir)
         plot_radix_speedup(radix_csv, data_dir)
     else:
-        print(f"  (no radix CSV found)")
+        print("  (no radix CSV found)")
 
-    print("Done.")
+    # Combined overview and throughput (if at least 2 exist)
+    n_csvs = sum([scan_csv.exists(), compact_csv.exists(), radix_csv.exists()])
+    if n_csvs >= 1:
+        print()
+        plot_overview(scan_csv, compact_csv, radix_csv, data_dir)
+        plot_throughput(scan_csv, compact_csv, radix_csv, data_dir)
+
+    print("\nDone.")
 
 
 if __name__ == "__main__":

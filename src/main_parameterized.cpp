@@ -84,11 +84,12 @@ static void genRandomArray(int n, int *a, unsigned int seed) {
 }
 
 static void printUsage(const char* prog) {
-    printf("Usage: %s --mode <scan|radix|all> --sizes <n1,n2,...> [--output <dir>]\n", prog);
+    printf("Usage: %s --mode <scan|compact|radix|all> --sizes <n1,n2,...> [--output <dir>]\n", prog);
     printf("\n");
-    printf("  --mode    scan  : CPU / Naive / Efficient / Thrust scan comparison\n");
-    printf("            radix : CPU std::sort vs GPU radix sort comparison\n");
-    printf("            all   : run both modes\n");
+    printf("  --mode    scan    : CPU / Naive / Efficient / Thrust scan comparison\n");
+    printf("            compact : CPU without-scan / with-scan / GPU efficient compact\n");
+    printf("            radix   : CPU std::sort vs GPU radix sort comparison\n");
+    printf("            all     : run all modes\n");
     printf("  --sizes   Comma-separated array sizes, e.g. 256,1024,4096,16384,...\n");
     printf("  --output  Parent directory for results (default: results/)\n");
     printf("            A timestamped subfolder is created automatically.\n");
@@ -150,6 +151,51 @@ void runScanBench(const std::vector<int>& sizes, const std::string& outDir) {
         csv.row("%d,%.6f,%.6f,%.6f,%.6f", n, cpuMs, naiveMs, efficientMs, thrustMs);
         printf("cpu=%.3f naive=%.3f eff=%.3f thrust=%.3f ms\n",
                cpuMs, naiveMs, efficientMs, thrustMs);
+
+        delete[] idata;
+        delete[] odata;
+    }
+    printf("  -> wrote %s\n", path.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Stream Compaction
+// ---------------------------------------------------------------------------
+void runCompactBench(const std::vector<int>& sizes, const std::string& outDir) {
+    std::string path = outDir + "/compact_comparison.csv";
+    CsvWriter csv;
+    csv.open(path);
+    csv.header("size,cpu_compact_without_scan_ms,cpu_compact_with_scan_ms,gpu_compact_efficient_ms");
+
+    printf("\n==== COMPACTION BENCHMARK ====\n");
+
+    for (int n : sizes) {
+        printf("  n = %d ... ", n);
+        fflush(stdout);
+
+        int *idata = new int[n];
+        int *odata = new int[n];
+        // Fill with ~50% zeros to exercise compaction meaningfully
+        srand(42);
+        for (int i = 0; i < n; i++) {
+            idata[i] = (rand() % 2) ? 0 : (rand() % 1000 + 1);
+        }
+
+        // --- CPU compact without scan ---
+        StreamCompaction::CPU::compactWithoutScan(n, odata, idata);
+        float cpuNoScanMs = StreamCompaction::CPU::timer().getCpuElapsedTimeForPreviousOperation();
+
+        // --- CPU compact with scan ---
+        StreamCompaction::CPU::compactWithScan(n, odata, idata);
+        float cpuScanMs = StreamCompaction::CPU::timer().getCpuElapsedTimeForPreviousOperation();
+
+        // --- GPU work-efficient compact ---
+        StreamCompaction::Efficient::compact(n, odata, idata);
+        float gpuMs = StreamCompaction::Efficient::timer().getGpuElapsedTimeForPreviousOperation();
+
+        csv.row("%d,%.6f,%.6f,%.6f", n, cpuNoScanMs, cpuScanMs, gpuMs);
+        printf("cpu_no_scan=%.3f cpu_scan=%.3f gpu_efficient=%.3f ms\n",
+               cpuNoScanMs, cpuScanMs, gpuMs);
 
         delete[] idata;
         delete[] odata;
@@ -225,8 +271,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (mode != "scan" && mode != "radix" && mode != "all") {
-        printf("Error: --mode must be 'scan', 'radix', or 'all'\n");
+    if (mode != "scan" && mode != "compact" && mode != "radix" && mode != "all") {
+        printf("Error: --mode must be 'scan', 'compact', 'radix', or 'all'\n");
         return 1;
     }
 
@@ -255,6 +301,9 @@ int main(int argc, char* argv[]) {
     // ---- Run benchmarks ----
     if (mode == "scan" || mode == "all") {
         runScanBench(sizes, outDir);
+    }
+    if (mode == "compact" || mode == "all") {
+        runCompactBench(sizes, outDir);
     }
     if (mode == "radix" || mode == "all") {
         runRadixBench(sizes, outDir);

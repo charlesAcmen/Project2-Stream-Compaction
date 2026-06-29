@@ -30,6 +30,12 @@ SCAN_SIZES = [
     524288, 1048576, 2097152, 4194304,
 ]
 
+COMPACT_SIZES = [
+    256, 512, 1024, 2048, 4096, 8192,
+    16384, 32768, 65536, 131072, 262144,
+    524288, 1048576, 2097152, 4194304,
+]
+
 RADIX_SIZES = [
     256, 512, 1024, 2048, 4096, 8192,
     16384, 32768, 65536, 131072, 262144,
@@ -68,7 +74,7 @@ def run_benchmark(mode, sizes, out_dir):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Run GPU benchmarks")
-    parser.add_argument("--mode", choices=["scan", "radix", "all"],
+    parser.add_argument("--mode", choices=["scan", "compact", "radix", "all"],
                         default="all")
     parser.add_argument("--no-plot", action="store_true",
                         help="Skip chart generation")
@@ -92,6 +98,8 @@ def main():
     ok = True
     if args.mode in ("scan", "all"):
         ok &= run_benchmark("scan", SCAN_SIZES, out_dir)
+    if args.mode in ("compact", "all"):
+        ok &= run_benchmark("compact", COMPACT_SIZES, out_dir)
     if args.mode in ("radix", "all"):
         ok &= run_benchmark("radix", RADIX_SIZES, out_dir)
 
