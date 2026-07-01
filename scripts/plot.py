@@ -708,13 +708,16 @@ def main():
     else:
         print("  (no sharedmem CSV found)")
 
-    # Combined overview and throughput (if at least 2 exist)
-    n_csvs = sum([scan_csv.exists(), compact_csv.exists(),
-                  radix_csv.exists(), sharedmem_csv.exists()])
-    if n_csvs >= 1:
+    # Combined overview and throughput — only when at least one large-scale
+    # CSV (scan / compact / radix) exists.  Shared-memory-only runs skip these.
+    large_scale_csvs = [scan_csv, compact_csv, radix_csv]
+    n_large = sum(int(c.exists()) for c in large_scale_csvs)
+    if n_large >= 1:
         print()
         plot_overview(scan_csv, compact_csv, radix_csv, data_dir)
         plot_throughput(scan_csv, compact_csv, radix_csv, data_dir)
+    else:
+        print("\n  (skipping overview/throughput — no large-scale CSVs found)")
 
     print("\nDone.")
 

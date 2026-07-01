@@ -19,8 +19,13 @@ namespace StreamCompaction {
         // ---------------------------------------------------------------
 
         /** Number of threads per block -- also the max elements
-         *  a single-block shared-memory scan can handle.               */
-        const int blockSize = 128;
+         *  a single-block shared-memory scan can handle.
+         *  Modern GPUs support up to 1024 threads/block.
+         *  Shared memory footprint at n=1024:
+         *    naive:    2 x 1024 x 4 B = 8 KB
+         *    efficient: (1024 + 1024/32) x 4 B ≈ 4.2 KB
+         *  Both fit comfortably within the 48 KB / 100 KB per-SM limit. */
+        const int blockSize = 1024;
 
         // ---------------------------------------------------------------
         // Bank-conflict avoidance (GPU Gems 3, Section 39.2.3)

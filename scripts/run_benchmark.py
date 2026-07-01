@@ -42,10 +42,10 @@ RADIX_SIZES = [
     524288, 1048576, 2097152,
 ]
 
-# Shared-memory scan: single-block; only sizes <= blockSize (128) are valid.
-# Includes power-of-2 and non-power-of-2 to probe padding + tree shape effects.
+# Shared-memory scan: single-block, n <= blockSize (1024).
+# Expands from small to saturating to show the full scaling picture.
 SHAREDMEM_SIZES = [
-    32, 48, 64, 96, 100, 127, 128,
+    64, 96, 128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
 ]
 
 

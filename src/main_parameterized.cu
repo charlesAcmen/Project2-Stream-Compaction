@@ -207,8 +207,21 @@ void runCompactBench(const std::vector<int>& sizes, const std::string& outDir) {
 
 // ---------------------------------------------------------------------------
 // Benchmark: Shared-Memory vs Global-Memory Scan
+//
+// Measurement strategy:
+//   At tiny sizes (n <= 128) kernel time is ~1-5 us — comparable to CUDA API
+//   overhead.  To get reliable numbers we:
+//     1. Allocate device memory ONCE per size (no per-call malloc/free).
+//     2. Run WARMUP launches to prime the CUDA context / GPU clock.
+//     3. Time a BATCH of ITERS launches with manual cudaEventRecord, then
+//        divide by ITERS for the per-scan average.
+//     4. Only kernel-launch regions are bracketed by events; memcpy H2D
+//        happens once before the batch and memcpy D2H once after.
 // ---------------------------------------------------------------------------
 void runSharedMemBench(const std::vector<int>& sizes, const std::string& outDir) {
+    const int WARMUP = 5;
+    const int ITERS  = 200;
+
     std::string path = outDir + "/sharedmem_comparison.csv";
     CsvWriter csv;
     csv.open(path);
@@ -217,51 +230,223 @@ void runSharedMemBench(const std::vector<int>& sizes, const std::string& outDir)
                "efficient_shared_nobc_ms");
 
     printf("\n==== SHARED-MEMORY SCAN BENCHMARK ====\n");
-    printf("  (single-block: n <= 128)\n");
+    printf("  (single-block: n <= 1024, %d warmup + %d timed iterations)\n",
+           WARMUP, ITERS);
+
+    cudaEvent_t evStart, evStop;
+    cudaEventCreate(&evStart);
+    cudaEventCreate(&evStop);
+
+    float elapsedMs;
 
     for (int n : sizes) {
-        printf("  n = %d ... ", n);
+        printf("  n = %-4d ... ", n);
         fflush(stdout);
 
         int *idata = new int[n];
-        int *odata = new int[n];
         genRandomArray(n, idata, 42);
 
-        // --- Naive global-memory scan ---
-        StreamCompaction::Naive::scan(n, odata, idata);
-        float naiveGlobalMs =
-            StreamCompaction::Naive::timer().getGpuElapsedTimeForPreviousOperation();
+        int paddedN = 1 << ilog2ceil(n);   // power-of-2 for eff. scan
+        int fullBlocks = (n + 127) / 128;  // grid for global-mem kernels
+        int naiveIters = ilog2ceil(n);     // log2(n) kernel launches per scan
 
-        // --- Naive shared-memory scan (Example 39-1) ---
-        StreamCompaction::SharedMem::scanNaive(n, odata, idata);
-        float naiveSharedMs =
-            StreamCompaction::SharedMem::timer().getGpuElapsedTimeForPreviousOperation();
+        // ---- reused device buffers ----
+        int *dev_data = nullptr, *dev_buf1 = nullptr, *dev_buf2 = nullptr;
+        cudaMalloc(&dev_data, paddedN * sizeof(int));   // efficient scan
+        cudaMalloc(&dev_buf1, n * sizeof(int));         // naive scan buf 1
+        cudaMalloc(&dev_buf2, n * sizeof(int));         // naive scan buf 2
 
-        // --- Work-efficient global-memory scan ---
-        StreamCompaction::Efficient::scan(n, odata, idata);
-        float effGlobalMs =
-            StreamCompaction::Efficient::timer().getGpuElapsedTimeForPreviousOperation();
+        // ---------------------------------------------------------------
+        // 1. Naive global-memory scan
+        // ---------------------------------------------------------------
+        {
+            cudaMemcpy(dev_buf1, idata, n * sizeof(int),
+                       cudaMemcpyHostToDevice);
 
-        // --- Work-efficient shared-memory WITH bank-conflict avoidance ---
-        StreamCompaction::SharedMem::scanWorkEfficient(n, odata, idata);
-        float effSharedBcMs =
-            StreamCompaction::SharedMem::timer().getGpuElapsedTimeForPreviousOperation();
+            // One "scan" = naiveIters kernel launches (ping-pong)
+            // Warmup
+            for (int w = 0; w < WARMUP; w++) {
+                for (int d = 1; d <= naiveIters; d++) {
+                    int offset = 1 << (d - 1);
+                    if (d % 2 == 1)
+                        StreamCompaction::Naive::kernNaiveScan<<<fullBlocks, 128>>>(
+                            n, offset, dev_buf2, dev_buf1);
+                    else
+                        StreamCompaction::Naive::kernNaiveScan<<<fullBlocks, 128>>>(
+                            n, offset, dev_buf1, dev_buf2);
+                }
+            }
+            cudaDeviceSynchronize();
 
-        // --- Work-efficient shared-memory WITHOUT bank-conflict avoidance ---
-        StreamCompaction::SharedMem::scanWorkEfficientNoBC(n, odata, idata);
-        float effSharedNoBcMs =
-            StreamCompaction::SharedMem::timer().getGpuElapsedTimeForPreviousOperation();
+            // Timed batch
+            cudaEventRecord(evStart);
+            for (int i = 0; i < ITERS; i++) {
+                for (int d = 1; d <= naiveIters; d++) {
+                    int offset = 1 << (d - 1);
+                    if (d % 2 == 1)
+                        StreamCompaction::Naive::kernNaiveScan<<<fullBlocks, 128>>>(
+                            n, offset, dev_buf2, dev_buf1);
+                    else
+                        StreamCompaction::Naive::kernNaiveScan<<<fullBlocks, 128>>>(
+                            n, offset, dev_buf1, dev_buf2);
+                }
+            }
+            cudaEventRecord(evStop);
+            cudaEventSynchronize(evStop);
+            cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+            float naiveGlobalMs = elapsedMs / ITERS;
 
-        csv.row("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
-                n, naiveGlobalMs, naiveSharedMs,
-                effGlobalMs, effSharedBcMs, effSharedNoBcMs);
-        printf("nv_gl=%.3f nv_sh=%.3f | ef_gl=%.3f ef_bc=%.3f ef_nobc=%.3f ms\n",
-               naiveGlobalMs, naiveSharedMs,
-               effGlobalMs, effSharedBcMs, effSharedNoBcMs);
+            // ---------------------------------------------------------------
+            // 2. Naive shared-memory scan
+            // ---------------------------------------------------------------
+            float naiveSharedMs = 0.f;
 
+            // Prepare: always start from dev_buf1 (contains original data)
+            cudaMemcpy(dev_buf2, idata, n * sizeof(int),
+                       cudaMemcpyHostToDevice);  // ensure clean input
+
+            // Warmup
+            size_t naiveSmem = 2 * n * sizeof(int);
+            for (int w = 0; w < WARMUP; w++) {
+                StreamCompaction::SharedMem::kernNaiveSharedScan<<<1, n, naiveSmem>>>(
+                    n, dev_buf1, dev_buf2);
+            }
+            cudaDeviceSynchronize();
+
+            // Timed batch
+            cudaEventRecord(evStart);
+            for (int i = 0; i < ITERS; i++) {
+                StreamCompaction::SharedMem::kernNaiveSharedScan<<<1, n, naiveSmem>>>(
+                    n, dev_buf1, dev_buf2);
+            }
+            cudaEventRecord(evStop);
+            cudaEventSynchronize(evStop);
+            cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+            naiveSharedMs = elapsedMs / ITERS;
+
+            // ---------------------------------------------------------------
+            // 3. Work-efficient global-memory scan
+            // ---------------------------------------------------------------
+            // Zero-pad dev_data and copy input
+            cudaMemcpy(dev_data, idata, n * sizeof(int),
+                       cudaMemcpyHostToDevice);
+            if (paddedN > n)
+                cudaMemset(dev_data + n, 0, (paddedN - n) * sizeof(int));
+
+            int levels = ilog2ceil(paddedN);
+
+            // Warmup (with initial data setup)
+            cudaMemcpy(dev_data, idata, n * sizeof(int),
+                       cudaMemcpyHostToDevice);
+            if (paddedN > n)
+                cudaMemset(dev_data + n, 0, (paddedN - n) * sizeof(int));
+            for (int w = 0; w < WARMUP; w++) {
+                for (int d = 0; d < levels; d++) {
+                    int nThreads = paddedN / (1 << (d + 1));
+                    int nBlocks = (nThreads + 127) / 128;
+                    StreamCompaction::Efficient::kernUpSweep<<<nBlocks, 128>>>(
+                        paddedN, d, dev_data);
+                }
+                cudaMemset(dev_data + paddedN - 1, 0, sizeof(int));
+                for (int d = levels - 1; d >= 0; d--) {
+                    int nThreads = paddedN / (1 << (d + 1));
+                    int nBlocks = (nThreads + 127) / 128;
+                    StreamCompaction::Efficient::kernDownSweep<<<nBlocks, 128>>>(
+                        paddedN, d, dev_data);
+                }
+            }
+            cudaDeviceSynchronize();
+
+            // Timed batch — no cudaMemcpy/cudaMemset inside:
+            // scan work is data-independent so repeating on the same
+            // (already-scanned) data measures pure kernel time.
+            cudaEventRecord(evStart);
+            for (int i = 0; i < ITERS; i++) {
+                for (int d = 0; d < levels; d++) {
+                    int nThreads = paddedN / (1 << (d + 1));
+                    int nBlocks = (nThreads + 127) / 128;
+                    StreamCompaction::Efficient::kernUpSweep<<<nBlocks, 128>>>(
+                        paddedN, d, dev_data);
+                }
+                cudaMemset(dev_data + paddedN - 1, 0, sizeof(int));
+                for (int d = levels - 1; d >= 0; d--) {
+                    int nThreads = paddedN / (1 << (d + 1));
+                    int nBlocks = (nThreads + 127) / 128;
+                    StreamCompaction::Efficient::kernDownSweep<<<nBlocks, 128>>>(
+                        paddedN, d, dev_data);
+                }
+            }
+            cudaEventRecord(evStop);
+            cudaEventSynchronize(evStop);
+            cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+            float effGlobalMs = elapsedMs / ITERS;
+
+            // ---------------------------------------------------------------
+            // 4. Work-efficient shared-memory scan WITH bank-conflict avoid.
+            // ---------------------------------------------------------------
+            int smemSlotsBc = paddedN +
+                (paddedN - 1) / 32 + 1;       // padded shared-mem slots
+            size_t effSmemBc = smemSlotsBc * sizeof(int);
+
+            // Warmup
+            for (int w = 0; w < WARMUP; w++) {
+                StreamCompaction::SharedMem::kernWorkEfficientSharedScan<<<
+                    1, paddedN, effSmemBc>>>(n, paddedN, dev_buf1, dev_buf2);
+            }
+            cudaDeviceSynchronize();
+
+            // Timed batch
+            cudaEventRecord(evStart);
+            for (int i = 0; i < ITERS; i++) {
+                StreamCompaction::SharedMem::kernWorkEfficientSharedScan<<<
+                    1, paddedN, effSmemBc>>>(n, paddedN, dev_buf1, dev_buf2);
+            }
+            cudaEventRecord(evStop);
+            cudaEventSynchronize(evStop);
+            cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+            float effSharedBcMs = elapsedMs / ITERS;
+
+            // ---------------------------------------------------------------
+            // 5. Work-efficient shared-memory WITHOUT bank-conflict avoid.
+            // ---------------------------------------------------------------
+            size_t effSmemNoBc = paddedN * sizeof(int);
+
+            // Warmup
+            for (int w = 0; w < WARMUP; w++) {
+                StreamCompaction::SharedMem::kernWorkEfficientSharedScanNoBC<<<
+                    1, paddedN, effSmemNoBc>>>(n, paddedN, dev_buf1, dev_buf2);
+            }
+            cudaDeviceSynchronize();
+
+            // Timed batch
+            cudaEventRecord(evStart);
+            for (int i = 0; i < ITERS; i++) {
+                StreamCompaction::SharedMem::kernWorkEfficientSharedScanNoBC<<<
+                    1, paddedN, effSmemNoBc>>>(n, paddedN, dev_buf1, dev_buf2);
+            }
+            cudaEventRecord(evStop);
+            cudaEventSynchronize(evStop);
+            cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+            float effSharedNoBcMs = elapsedMs / ITERS;
+
+            // ---- Write CSV row ----
+            csv.row("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
+                    n, naiveGlobalMs, naiveSharedMs,
+                    effGlobalMs, effSharedBcMs, effSharedNoBcMs);
+            printf("nv_gl=%.4f nv_sh=%.4f | ef_gl=%.4f ef_bc=%.4f ef_nbc=%.4f ms\n",
+                   naiveGlobalMs, naiveSharedMs,
+                   effGlobalMs, effSharedBcMs, effSharedNoBcMs);
+        }
+
+        // ---- Cleanup ----
+        cudaFree(dev_data);
+        cudaFree(dev_buf1);
+        cudaFree(dev_buf2);
         delete[] idata;
-        delete[] odata;
     }
+
+    cudaEventDestroy(evStart);
+    cudaEventDestroy(evStop);
     printf("  -> wrote %s\n", path.c_str());
 }
 
@@ -373,20 +558,20 @@ int main(int argc, char* argv[]) {
         runRadixBench(sizes, outDir);
     }
     if (mode == "sharedmem" || mode == "all") {
-        // For shared-memory mode, clamp sizes to blockSize (128)
+        // For shared-memory mode, clamp sizes to blockSize (1024)
         std::vector<int> clampedSizes;
         for (int s : sizes) {
-            if (s <= 128) {
+            if (s <= 1024) {
                 clampedSizes.push_back(s);
             } else {
-                printf("  NOTE: skipping n=%d (> blockSize=128 for "
+                printf("  NOTE: skipping n=%d (> blockSize=1024 for "
                        "shared-mem scan)\n", s);
             }
         }
         if (!clampedSizes.empty()) {
             runSharedMemBench(clampedSizes, outDir);
         } else {
-            printf("\n  SKIP sharedmem: all sizes > blockSize=128\n");
+            printf("\n  SKIP sharedmem: all sizes > blockSize=1024\n");
         }
     }
 

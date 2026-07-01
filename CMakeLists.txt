@@ -46,7 +46,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME} stream_compaction)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
 
 # Add parameterized benchmark executable
-set(sources_param "src/main_parameterized.cpp")
+set(sources_param "src/main_parameterized.cu")
 add_executable(benchmark ${sources_param} ${headers})
 target_link_libraries(benchmark stream_compaction)
 
