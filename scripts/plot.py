@@ -466,6 +466,199 @@ def plot_throughput(scan_csv, compact_csv, radix_csv, out_dir):
     print(f"  -> {out_path}")
 
 
+# Shared memory scan colours
+SHARED_COLOR        = "#D55E00"   # shared-memory lines (warm orange)
+GLOBAL_COLOR        = "#0072B2"   # global-memory lines (blue)
+BC_COLOR            = "#009E73"   # bank-conflict-free (green)
+NOBC_COLOR          = "#CC79A7"   # bank-conflicted (magenta/pink)
+SHARED_NAIVE_COLOR  = "#E69F00"   # shared naive
+
+
+# ======================================================================
+# Chart 9: Shared-Memory vs Global-Memory Scan (log-log)
+# ======================================================================
+def plot_sharedmem_comparison(csv_path, out_dir):
+    """Compare all scan methods at small N (where shared-mem is valid)."""
+    _, rows = read_csv(csv_path)
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    nv_gl  = np.array([r[1] for r in rows])   # naive global
+    nv_sh  = np.array([r[2] for r in rows])   # naive shared
+    ef_gl  = np.array([r[3] for r in rows])   # efficient global
+    ef_bc  = np.array([r[4] for r in rows])   # efficient shared (BC)
+    ef_nbc = np.array([r[5] for r in rows])   # efficient shared (no BC)
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    ax.loglog(sizes, nv_gl,  "o--", color=NAIVE_COLOR,          linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Naive Global Mem", zorder=3)
+    ax.loglog(sizes, nv_sh,  "o-",  color=SHARED_NAIVE_COLOR,   linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Naive Shared Mem", zorder=4)
+    ax.loglog(sizes, ef_gl,  "D--", color=EFFICIENT_COLOR,      linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Efficient Global Mem", zorder=2)
+    ax.loglog(sizes, ef_bc,  "s-",  color=BC_COLOR,             linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Efficient Shared Mem (bank-conflict free)", zorder=5)
+    ax.loglog(sizes, ef_nbc, "s--", color=NOBC_COLOR,           linewidth=LINE_WIDTH,
+              markersize=MARKER_SIZE, label="Efficient Shared Mem (bank-conflicted)", zorder=1)
+
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("Shared Memory vs Global Memory Scan — Small N")
+    ax.legend(loc="upper left", fontsize=FONT_SIZE - 3)
+
+    ax.set_xticks(sizes)
+    ax.set_xticklabels([str(s) for s in sizes], rotation=35, ha="right")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_sharedmem_comparison.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 10: Shared-Memory Speedup Ratio (shared / global)
+# ======================================================================
+def plot_sharedmem_speedup(csv_path, out_dir):
+    """GPU shared-memory speedup vs global-memory baseline (both GPU)."""
+    _, rows = read_csv(csv_path)
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    nv_gl  = np.array([r[1] for r in rows])
+    nv_sh  = np.array([r[2] for r in rows])
+    ef_gl  = np.array([r[3] for r in rows])
+    ef_bc  = np.array([r[4] for r in rows])
+
+    # Speedup = how many times faster shared-mem is vs global-mem
+    naive_sp   = nv_gl / nv_sh       # > 1 means shared is faster
+    eff_sp     = ef_gl / ef_bc       # > 1 means shared is faster
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    ax.semilogx(sizes, naive_sp, "o-",  color=SHARED_NAIVE_COLOR, linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="Naive: Shared / Global")
+    ax.semilogx(sizes, eff_sp,   "s-",  color=BC_COLOR,           linewidth=LINE_WIDTH,
+                markersize=MARKER_SIZE, label="Efficient: Shared (BC-free) / Global")
+
+    ax.axhline(y=1.0, color="#999999", linestyle="--", linewidth=0.8, alpha=0.7)
+    ax.text(sizes[0] * 1.1, 1.03, "global-mem baseline = 1.0x",
+            color="#999999", fontsize=9, ha="left")
+
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Speedup (Shared / Global)")
+    ax.set_title("Shared Memory Advantage — Speedup vs Global Memory Scan")
+    ax.legend(loc="upper left")
+
+    ax.set_xticks(sizes)
+    ax.set_xticklabels([str(s) for s in sizes], rotation=35, ha="right")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.4)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.2)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_sharedmem_speedup.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 11: Bank-Conflict Avoidance Impact
+# ======================================================================
+def plot_bank_conflict_impact(csv_path, out_dir):
+    """Show the direct impact of bank-conflict-free padding.
+
+    Left:  absolute time (BC vs no-BC) — line chart.
+    Right: speedup ratio (no-BC / BC)  — bar chart.
+    A ratio > 1 means padding helps; ~1 means padding is neutral.     """
+    _, rows = read_csv(csv_path)
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    ef_bc  = np.array([r[4] for r in rows])
+    ef_nbc = np.array([r[5] for r in rows])
+
+    speedup = ef_nbc / ef_bc            # > 1 => BC-free is faster
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    # --- Left: absolute time comparison ---
+    ax1.semilogy(sizes, ef_bc,  "s-",  color=BC_COLOR,   linewidth=LINE_WIDTH,
+                 markersize=MARKER_SIZE, label="Bank-conflict free (padded)")
+    ax1.semilogy(sizes, ef_nbc, "s--", color=NOBC_COLOR,  linewidth=LINE_WIDTH,
+                 markersize=MARKER_SIZE, label="Bank-conflicted (unpadded)")
+    ax1.set_xlabel("Array Size N")
+    ax1.set_ylabel("Time (ms) — log scale")
+    ax1.set_title("Absolute Time: BC-free vs BC-conflicted")
+    ax1.legend(loc="upper left")
+    ax1.set_xticks(sizes)
+    ax1.set_xticklabels([str(s) for s in sizes], rotation=35, ha="right")
+    ax1.grid(True, which="major", linestyle="-", linewidth=0.4)
+
+    # --- Right: speedup bars ---
+    bar_colors = [BC_COLOR if s >= 1.0 else NOBC_COLOR for s in speedup]
+    ax2.bar(np.arange(len(sizes)), speedup, color=bar_colors,
+            width=0.55, edgecolor="white")
+    ax2.axhline(y=1.0, color="#333333", linestyle="--", linewidth=1.0, alpha=0.8)
+    ax2.set_xticks(np.arange(len(sizes)))
+    ax2.set_xticklabels([str(s) for s in sizes], rotation=35, ha="right")
+    ax2.set_xlabel("Array Size N")
+    ax2.set_ylabel("Speedup ratio (unpadded / padded)")
+    ax2.set_title("BC-Avoidance Speedup: > 1 means padding helps")
+
+    # Value labels
+    for i, (s, sp) in enumerate(zip(sizes, speedup)):
+        va = "bottom" if sp >= 1 else "top"
+        y_off = 0.005 if sp >= 1 else -0.005
+        ax2.text(i, sp + y_off * max(speedup), f"{sp:.2f}x",
+                 ha="center", fontsize=8, fontweight="bold",
+                 va=va, color=bar_colors[i])
+
+    ax2.grid(True, which="major", axis="y", linestyle="-", linewidth=0.4)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_bank_conflict_impact.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
+# ======================================================================
+# Chart 12: Shared-Memory Throughput (M elements / ms)
+# ======================================================================
+def plot_sharedmem_throughput(csv_path, out_dir):
+    """Throughput for shared-memory scan implementations."""
+    _, rows = read_csv(csv_path)
+    sizes  = np.array([r[0] for r in rows], dtype=int)
+    nv_sh  = np.array([r[2] for r in rows])
+    ef_gl  = np.array([r[3] for r in rows])
+    ef_bc  = np.array([r[4] for r in rows])
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    ax.semilogy(sizes, sizes / ef_gl / 1e3, "D--", color=EFFICIENT_COLOR,
+                linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                label="Efficient Global Mem")
+    ax.semilogy(sizes, sizes / nv_sh / 1e3, "o-", color=SHARED_NAIVE_COLOR,
+                linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                label="Naive Shared Mem")
+    ax.semilogy(sizes, sizes / ef_bc / 1e3, "s-", color=BC_COLOR,
+                linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
+                label="Efficient Shared Mem (BC-free)")
+
+    ax.set_xlabel("Array Size N")
+    ax.set_ylabel("Throughput (Melements / ms)")
+    ax.set_title("Shared Memory Scan — Throughput")
+    ax.legend(loc="upper left")
+
+    ax.set_xticks(sizes)
+    ax.set_xticklabels([str(s) for s in sizes], rotation=35, ha="right")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.4)
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "chart_sharedmem_throughput.png")
+    fig.savefig(out_path, dpi=DPI)
+    plt.close(fig)
+    print(f"  -> {out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -505,8 +698,19 @@ def main():
     else:
         print("  (no radix CSV found)")
 
+    sharedmem_csv = data_dir / "sharedmem_comparison.csv"
+    if sharedmem_csv.exists():
+        print()
+        plot_sharedmem_comparison(sharedmem_csv, data_dir)
+        plot_sharedmem_speedup(sharedmem_csv, data_dir)
+        plot_bank_conflict_impact(sharedmem_csv, data_dir)
+        plot_sharedmem_throughput(sharedmem_csv, data_dir)
+    else:
+        print("  (no sharedmem CSV found)")
+
     # Combined overview and throughput (if at least 2 exist)
-    n_csvs = sum([scan_csv.exists(), compact_csv.exists(), radix_csv.exists()])
+    n_csvs = sum([scan_csv.exists(), compact_csv.exists(),
+                  radix_csv.exists(), sharedmem_csv.exists()])
     if n_csvs >= 1:
         print()
         plot_overview(scan_csv, compact_csv, radix_csv, data_dir)

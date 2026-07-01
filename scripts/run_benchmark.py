@@ -42,6 +42,12 @@ RADIX_SIZES = [
     524288, 1048576, 2097152,
 ]
 
+# Shared-memory scan: single-block; only sizes <= blockSize (128) are valid.
+# Includes power-of-2 and non-power-of-2 to probe padding + tree shape effects.
+SHAREDMEM_SIZES = [
+    32, 48, 64, 96, 100, 127, 128,
+]
+
 
 def sizes_to_arg(sizes):
     return ",".join(str(s) for s in sizes)
@@ -74,7 +80,8 @@ def run_benchmark(mode, sizes, out_dir):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Run GPU benchmarks")
-    parser.add_argument("--mode", choices=["scan", "compact", "radix", "all"],
+    parser.add_argument("--mode",
+                        choices=["scan", "compact", "radix", "sharedmem", "all"],
                         default="all")
     parser.add_argument("--no-plot", action="store_true",
                         help="Skip chart generation")
@@ -102,6 +109,8 @@ def main():
         ok &= run_benchmark("compact", COMPACT_SIZES, out_dir)
     if args.mode in ("radix", "all"):
         ok &= run_benchmark("radix", RADIX_SIZES, out_dir)
+    if args.mode in ("sharedmem", "all"):
+        ok &= run_benchmark("sharedmem", SHAREDMEM_SIZES, out_dir)
 
     # ---- Plot ----
     if ok and not args.no_plot:

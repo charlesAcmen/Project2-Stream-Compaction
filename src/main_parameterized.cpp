@@ -29,6 +29,7 @@
 #include <stream_compaction/efficient.h>
 #include <stream_compaction/thrust.h>
 #include <stream_compaction/radixsort.h>
+#include <stream_compaction/sharedMem.h>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -86,10 +87,11 @@ static void genRandomArray(int n, int *a, unsigned int seed) {
 static void printUsage(const char* prog) {
     printf("Usage: %s --mode <scan|compact|radix|all> --sizes <n1,n2,...> [--output <dir>]\n", prog);
     printf("\n");
-    printf("  --mode    scan    : CPU / Naive / Efficient / Thrust scan comparison\n");
-    printf("            compact : CPU without-scan / with-scan / GPU efficient compact\n");
-    printf("            radix   : CPU std::sort vs GPU radix sort comparison\n");
-    printf("            all     : run all modes\n");
+    printf("  --mode    scan      : CPU / Naive / Efficient / Thrust scan comparison\n");
+    printf("            compact   : CPU without-scan / with-scan / GPU efficient compact\n");
+    printf("            radix     : CPU std::sort vs GPU radix sort comparison\n");
+    printf("            sharedmem : Shared-memory vs global-memory scan (n <= 128)\n");
+    printf("            all       : run all modes\n");
     printf("  --sizes   Comma-separated array sizes, e.g. 256,1024,4096,16384,...\n");
     printf("  --output  Parent directory for results (default: results/)\n");
     printf("            A timestamped subfolder is created automatically.\n");
@@ -204,6 +206,66 @@ void runCompactBench(const std::vector<int>& sizes, const std::string& outDir) {
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark: Shared-Memory vs Global-Memory Scan
+// ---------------------------------------------------------------------------
+void runSharedMemBench(const std::vector<int>& sizes, const std::string& outDir) {
+    std::string path = outDir + "/sharedmem_comparison.csv";
+    CsvWriter csv;
+    csv.open(path);
+    csv.header("size,naive_global_ms,naive_shared_ms,"
+               "efficient_global_ms,efficient_shared_bc_ms,"
+               "efficient_shared_nobc_ms");
+
+    printf("\n==== SHARED-MEMORY SCAN BENCHMARK ====\n");
+    printf("  (single-block: n <= 128)\n");
+
+    for (int n : sizes) {
+        printf("  n = %d ... ", n);
+        fflush(stdout);
+
+        int *idata = new int[n];
+        int *odata = new int[n];
+        genRandomArray(n, idata, 42);
+
+        // --- Naive global-memory scan ---
+        StreamCompaction::Naive::scan(n, odata, idata);
+        float naiveGlobalMs =
+            StreamCompaction::Naive::timer().getGpuElapsedTimeForPreviousOperation();
+
+        // --- Naive shared-memory scan (Example 39-1) ---
+        StreamCompaction::SharedMem::scanNaive(n, odata, idata);
+        float naiveSharedMs =
+            StreamCompaction::SharedMem::timer().getGpuElapsedTimeForPreviousOperation();
+
+        // --- Work-efficient global-memory scan ---
+        StreamCompaction::Efficient::scan(n, odata, idata);
+        float effGlobalMs =
+            StreamCompaction::Efficient::timer().getGpuElapsedTimeForPreviousOperation();
+
+        // --- Work-efficient shared-memory WITH bank-conflict avoidance ---
+        StreamCompaction::SharedMem::scanWorkEfficient(n, odata, idata);
+        float effSharedBcMs =
+            StreamCompaction::SharedMem::timer().getGpuElapsedTimeForPreviousOperation();
+
+        // --- Work-efficient shared-memory WITHOUT bank-conflict avoidance ---
+        StreamCompaction::SharedMem::scanWorkEfficientNoBC(n, odata, idata);
+        float effSharedNoBcMs =
+            StreamCompaction::SharedMem::timer().getGpuElapsedTimeForPreviousOperation();
+
+        csv.row("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
+                n, naiveGlobalMs, naiveSharedMs,
+                effGlobalMs, effSharedBcMs, effSharedNoBcMs);
+        printf("nv_gl=%.3f nv_sh=%.3f | ef_gl=%.3f ef_bc=%.3f ef_nobc=%.3f ms\n",
+               naiveGlobalMs, naiveSharedMs,
+               effGlobalMs, effSharedBcMs, effSharedNoBcMs);
+
+        delete[] idata;
+        delete[] odata;
+    }
+    printf("  -> wrote %s\n", path.c_str());
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: Radix Sort
 // ---------------------------------------------------------------------------
 void runRadixBench(const std::vector<int>& sizes, const std::string& outDir) {
@@ -271,8 +333,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (mode != "scan" && mode != "compact" && mode != "radix" && mode != "all") {
-        printf("Error: --mode must be 'scan', 'compact', 'radix', or 'all'\n");
+    if (mode != "scan" && mode != "compact" && mode != "radix" &&
+        mode != "sharedmem" && mode != "all") {
+        printf("Error: --mode must be 'scan', 'compact', 'radix', "
+               "'sharedmem', or 'all'\n");
         return 1;
     }
 
@@ -307,6 +371,23 @@ int main(int argc, char* argv[]) {
     }
     if (mode == "radix" || mode == "all") {
         runRadixBench(sizes, outDir);
+    }
+    if (mode == "sharedmem" || mode == "all") {
+        // For shared-memory mode, clamp sizes to blockSize (128)
+        std::vector<int> clampedSizes;
+        for (int s : sizes) {
+            if (s <= 128) {
+                clampedSizes.push_back(s);
+            } else {
+                printf("  NOTE: skipping n=%d (> blockSize=128 for "
+                       "shared-mem scan)\n", s);
+            }
+        }
+        if (!clampedSizes.empty()) {
+            runSharedMemBench(clampedSizes, outDir);
+        } else {
+            printf("\n  SKIP sharedmem: all sizes > blockSize=128\n");
+        }
     }
 
     printf("\nDone.\n");
